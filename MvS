@@ -1,239 +1,490 @@
--- Instant-Shot Aimbot for Duels: Murderers vs Sheriffs
--- Fixed right side, green/red tint, white outline, no teammates
+--[[
+    Hitbox Expander + ESP + Auto Collect Spawnables
+    - Hitbox with anti‑wall
+    - Enemy team ESP (glow through walls)
+    - Auto‑fires CollectEventSpawnable remote (looping)
+--]]
 
+-- Load Rayfield
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+
+-- Services
 local Players = game:GetService("Players")
-local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local TweenService = game:GetService("TweenService")
+local LocalPlayer = Players.LocalPlayer
 
-local player = Players.LocalPlayer
+-- ==================== Helper Functions (from original) ====================
 
--- ===== Settings =====
-local cooldownTime = 2.5
-local lastShotTime = 0
-local canShoot = true
-
--- Colors
-local readyColor = Color3.fromRGB(0, 255, 0)
-local cooldownColor = Color3.fromRGB(255, 0, 0)
-
--- ===== GUI =====
-local screenGui = nil
-local button = nil
-local stroke = nil
-
--- Cache
-local camera = Workspace.CurrentCamera
-local localBeam = ReplicatedStorage:FindFirstChild("BindableEvents"):FindFirstChild("LocalBeam")
-local killedRemote = ReplicatedStorage:FindFirstChild("Remotes"):FindFirstChild("Killed")
-
-local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-
--- ===== Team Check (same as before) =====
-local function isValidTarget(otherPlayer)
-    if not otherPlayer or otherPlayer == player then return false end
-    if not otherPlayer.Character then return false end
-    local hum = otherPlayer.Character:FindFirstChild("Humanoid")
-    if not hum or hum.Health <= 0 then return false end
-
-    local myGame = player:GetAttribute("Game")
-    local theirGame = otherPlayer:GetAttribute("Game")
-    if myGame and theirGame and myGame ~= theirGame then
-        return false
-    end
-
-    local myTeam = player:GetAttribute("Team")
-    local theirTeam = otherPlayer:GetAttribute("Team")
-    if myTeam and theirTeam and myTeam == theirTeam then
-        return false
-    end
-
-    return true
+local function normalizeName(n)
+    return tostring(n):gsub("%s+", "")
 end
 
--- ===== Weapon & Combat (optimized) =====
-local function getWeapon()
-    local char = player.Character
-    if not char then return nil end
-    for _, tool in pairs(char:GetChildren()) do
-        if tool:IsA("Tool") and tool:FindFirstChild("fire") then
-            return tool
+local function getTeamFrames()
+    local ok, redFrame, blueFrame = pcall(function()
+        local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        if not pg then return nil, nil end
+        local main = pg:FindFirstChild("Main")
+        if not main then return nil, nil end
+        local mgf = main:FindFirstChild("MainGameFrame")
+        if not mgf then return nil, nil end
+        local pf = mgf:FindFirstChild("PlayersFrame")
+        if not pf then return nil, nil end
+        return pf:FindFirstChild("TeamRedFrame"), pf:FindFirstChild("TeamBlueFrame")
+    end)
+    if not ok or not redFrame or not blueFrame then
+        return nil, nil
+    end
+    return redFrame, blueFrame
+end
+
+local function readNames(frame)
+    local names = {}
+    for _, child in ipairs(frame:GetChildren()) do
+        if child:IsA("Frame") then
+            table.insert(names, child.Name)
         end
     end
-    local bp = player:FindFirstChild("Backpack")
-    if bp then
-        for _, tool in pairs(bp:GetChildren()) do
-            if tool:IsA("Tool") and tool:FindFirstChild("fire") then
-                tool.Parent = char
-                return tool
+    return names
+end
+
+local function getEnemies()
+    local redFrame, blueFrame = getTeamFrames()
+    if not redFrame or not blueFrame then
+        return {}
+    end
+
+    local redRaw = readNames(redFrame)
+    local blueRaw = readNames(blueFrame)
+
+    local youInRed, youInBlue = false, false
+    local redSet, blueSet = {}, {}
+
+    for _, n in ipairs(redRaw) do
+        local nn = normalizeName(n)
+        redSet[nn] = true
+        if nn == normalizeName(LocalPlayer.Name) then
+            youInRed = true
+        end
+    end
+
+    for _, n in ipairs(blueRaw) do
+        local nn = normalizeName(n)
+        blueSet[nn] = true
+        if nn == normalizeName(LocalPlayer.Name) then
+            youInBlue = true
+        end
+    end
+    if not (youInRed or youInBlue) then
+        return {}
+    end
+
+    local enemySet = youInRed and blueSet or redSet
+    local enemies = {}
+
+    for name,_ in pairs(enemySet) do
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if normalizeName(plr.Name) == name and plr ~= LocalPlayer then
+                table.insert(enemies, plr)
             end
         end
     end
-    return nil
+
+    return enemies
 end
 
-local function hasClearLineOfSight(targetPlayer)
-    local char = player.Character
-    local tChar = targetPlayer.Character
-    if not char or not tChar then return false end
-    local myRoot = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Torso")
-    local tRoot = tChar:FindFirstChild("HumanoidRootPart") or tChar:FindFirstChild("Torso")
-    if not myRoot or not tRoot then return false end
-    local dir = (tRoot.Position - myRoot.Position).Unit
-    local dist = (tRoot.Position - myRoot.Position).Magnitude
+-- ==================== Hitbox Expander with Anti‑Wall ====================
+
+_G.HitboxEnabled = false
+_G.AntiWall = false
+_G.HeadSize = nil
+_G.Transparency = nil
+_G.SelectedColor = nil
+_G.Originals = {}
+local visibilityCache = {}
+
+local function isVisible(part)
+    local cam = Workspace.CurrentCamera
+    if not cam then return true end
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Blacklist
-    params.FilterDescendantsInstances = {char, tChar}
-    params.IgnoreWater = true
-    return workspace:Raycast(myRoot.Position, dir * dist, params) == nil
+    params.FilterDescendantsInstances = {LocalPlayer.Character}
+    local result = Workspace:Raycast(cam.CFrame.Position, (part.Position - cam.CFrame.Position), params)
+    if not result then return true end
+    return result.Instance:IsDescendantOf(part.Parent)
 end
 
-local function getNearestVisibleEnemy()
+local function applyHitbox(player)
+    if player == LocalPlayer then return end
     local char = player.Character
-    if not char then return nil end
-    local myRoot = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Torso")
-    if not myRoot then return nil end
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
 
-    local nearest, minDist = nil, math.huge
-    for _, other in pairs(Players:GetPlayers()) do
-        if isValidTarget(other) then
-            local oRoot = other.Character:FindFirstChild("HumanoidRootPart") or other.Character:FindFirstChild("Torso")
-            if oRoot then
-                local dist = (myRoot.Position - oRoot.Position).Magnitude
-                if dist < minDist and hasClearLineOfSight(other) then
-                    minDist = dist
-                    nearest = other
+    if not _G.Originals[player.Name] then
+        _G.Originals[player.Name] = {
+            Size = hrp.Size,
+            Transparency = hrp.Transparency,
+            Color = hrp.BrickColor,
+            Material = hrp.Material,
+            CanCollide = hrp.CanCollide
+        }
+    end
+    local orig = _G.Originals[player.Name]
+
+    if _G.AntiWall and visibilityCache[player.Name] == false then
+        hrp.Size = orig.Size
+        hrp.Transparency = orig.Transparency
+        hrp.BrickColor = orig.Color
+        hrp.Material = orig.Material
+        hrp.CanCollide = orig.CanCollide
+        return
+    end
+
+    if _G.HitboxEnabled then
+        if _G.HeadSize then hrp.Size = Vector3.new(_G.HeadSize, _G.HeadSize, _G.HeadSize) end
+        if _G.Transparency then hrp.Transparency = _G.Transparency end
+        if _G.SelectedColor then hrp.BrickColor = BrickColor.new(_G.SelectedColor) end
+        hrp.Material = Enum.Material.Neon
+        hrp.CanCollide = false
+    else
+        hrp.Size = orig.Size
+        hrp.Transparency = orig.Transparency
+        hrp.BrickColor = orig.Color
+        hrp.Material = orig.Material
+        hrp.CanCollide = orig.CanCollide
+    end
+end
+
+task.spawn(function()
+    while true do
+        if _G.AntiWall then
+            for _, plr in ipairs(Players:GetPlayers()) do
+                if plr ~= LocalPlayer then
+                    local char = plr.Character
+                    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                    if hrp then
+                        visibilityCache[plr.Name] = isVisible(hrp)
+                    end
                 end
             end
         end
+        task.wait(0.15)
     end
-    return nearest
+end)
+
+task.spawn(function()
+    while true do
+        for _, plr in ipairs(Players:GetPlayers()) do
+            applyHitbox(plr)
+        end
+        task.wait(0.16)
+    end
+end)
+
+local function onCharacterAdded(player, character)
+    character:WaitForChild("HumanoidRootPart", 5)
+    task.wait(0.1)
+    applyHitbox(player)
 end
 
--- Shoot instantly – no task.spawn, no extra checks
-local function shootEnemy(targetPlayer)
+for _, plr in ipairs(Players:GetPlayers()) do
+    plr.CharacterAdded:Connect(function(char) onCharacterAdded(plr, char) end)
+    if plr.Character then onCharacterAdded(plr, plr.Character) end
+end
+Players.PlayerAdded:Connect(function(plr)
+    plr.CharacterAdded:Connect(function(char) onCharacterAdded(plr, char) end)
+end)
+
+-- ==================== ESP (Enemy Team Highlight) ====================
+
+_G.ESPEnabled = false
+local highlights = {}
+
+local function removeHighlight(player)
+    local h = highlights[player]
+    if h then
+        pcall(function() h:Destroy() end)
+        highlights[player] = nil
+    end
+end
+
+local function createHighlight(player, color)
     local char = player.Character
-    if not char then return false end
-    local weapon = getWeapon()
-    if not weapon then return false end
-    local handle = weapon:FindFirstChild("Handle")
-    if not handle then return false end
-    local tRoot = targetPlayer.Character:FindFirstChild("HumanoidRootPart") or targetPlayer.Character:FindFirstChild("Torso")
-    if not tRoot then return false end
+    if not char then return end
+    if not char:FindFirstChild("HumanoidRootPart") then return end
 
-    local startPos = handle.Position
-    local hitPos = tRoot.Position
-
-    -- Fire all remotes immediately
-    if localBeam then pcall(function() localBeam:Fire(handle, hitPos) end) end
-    local fireRemote = weapon:FindFirstChild("fire")
-    if fireRemote then pcall(function() fireRemote:FireServer() end) end
-    local beamRemote = weapon:FindFirstChild("showBeam")
-    if beamRemote then pcall(function() beamRemote:FireServer(hitPos, startPos, handle) end) end
-    local killRemote = weapon:FindFirstChild("kill")
-    if killRemote then
-        local dir = (hitPos - startPos).Unit
-        pcall(function() killRemote:FireServer(targetPlayer, dir) end)
+    local h = highlights[player]
+    if not h or h.Parent == nil or h.Adornee ~= char then
+        if h then pcall(function() h:Destroy() end) end
+        h = Instance.new("Highlight")
+        h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        h.FillTransparency = 0.5
+        h.OutlineColor = Color3.fromRGB(255,255,255)
+        h.Parent = char
+        highlights[player] = h
     end
-    if killedRemote then pcall(function() killedRemote:FireServer(targetPlayer) end) end
-
-    return true
+    h.Adornee = char
+    h.FillColor = color
 end
 
--- ===== Create GUI =====
-local function createGUI()
-    if screenGui then screenGui:Destroy() end
-
-    local playerGui = player:WaitForChild("PlayerGui")
-
-    screenGui = Instance.new("ScreenGui")
-    screenGui.Name = "AimbotButtonGui"
-    screenGui.ResetOnSpawn = false
-    screenGui.IgnoreGuiInset = true
-    screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    screenGui.Parent = playerGui
-
-    local shadow = Instance.new("Frame")
-    shadow.Size = UDim2.new(0, 76, 0, 76)
-    shadow.AnchorPoint = Vector2.new(1, 1)
-    shadow.Position = UDim2.new(1, -20, 1, -180)
-    shadow.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-    shadow.BackgroundTransparency = 0.85
-    shadow.BorderSizePixel = 0
-    shadow.ZIndex = 9
-    shadow.Parent = screenGui
-    Instance.new("UICorner", shadow).CornerRadius = UDim.new(0, 16)
-
-    button = Instance.new("TextButton")
-    button.Size = UDim2.new(0, 70, 0, 70)
-    button.AnchorPoint = Vector2.new(1, 1)
-    button.Position = UDim2.new(1, -23, 1, -183)
-    button.BackgroundColor3 = readyColor
-    button.BackgroundTransparency = 0.85
-    button.BorderSizePixel = 0
-    button.Text = ""
-    button.AutoButtonColor = false
-    button.ZIndex = 10
-    button.Parent = screenGui
-
-    Instance.new("UICorner", button).CornerRadius = UDim.new(0, 14)
-
-    stroke = Instance.new("UIStroke", button)
-    stroke.Color = Color3.fromRGB(255, 255, 255)
-    stroke.Transparency = 0.0
-    stroke.Thickness = 3.0
-    stroke.LineJoinMode = Enum.LineJoinMode.Round
-
-    -- Button color update
-    local function setButtonState(isReady)
-        local targetColor = isReady and readyColor or cooldownColor
-        local tween = TweenService:Create(button, tweenInfo, {BackgroundColor3 = targetColor})
-        tween:Play()
+local function updateESP()
+    if not _G.ESPEnabled then
+        for plr,_ in pairs(highlights) do
+            removeHighlight(plr)
+        end
+        return
     end
 
-    -- === INSTANT SHOOT on press ===
-    local function instantShoot()
-        if not canShoot then return end
-        if not player.Character or not player.Character:FindFirstChild("Humanoid") then return end
-        if not getWeapon() then return end
+    local enemies = getEnemies()
+    if not enemies or #enemies == 0 then
+        for plr,_ in pairs(highlights) do
+            removeHighlight(plr)
+        end
+        return
+    end
 
-        local target = getNearestVisibleEnemy()
-        if target and shootEnemy(target) then
-            canShoot = false
-            lastShotTime = tick()
-            setButtonState(false)
-            -- Cooldown timer runs in background
-            task.spawn(function()
-                while tick() - lastShotTime < cooldownTime do task.wait(0.1) end
-                canShoot = true
-                setButtonState(true)
-            end)
+    local redFrame, blueFrame = getTeamFrames()
+    local enemyColor
+    if redFrame and blueFrame then
+        local redRaw = readNames(redFrame)
+        local youInRed = false
+        for _, n in ipairs(redRaw) do
+            if normalizeName(n) == normalizeName(LocalPlayer.Name) then youInRed = true; break end
+        end
+        enemyColor = youInRed and Color3.fromRGB(0, 0, 255) or Color3.fromRGB(255, 0, 0)
+    else
+        enemyColor = Color3.fromRGB(255, 0, 0)
+    end
+
+    local enemySet = {}
+    for _, e in ipairs(enemies) do enemySet[e] = true end
+    for plr,_ in pairs(highlights) do
+        if not enemySet[plr] then
+            removeHighlight(plr)
         end
     end
 
-    -- Fire on press (MouseButton1Down) for instant reaction
-    button.MouseButton1Down:Connect(instantShoot)
-    -- For mobile, TouchTap is fine but let's also use TouchStarted for instant response
-    button.TouchStarted:Connect(instantShoot)
-
-    -- Initial ready state
-    canShoot = true
-    lastShotTime = 0
-    setButtonState(true)
+    for _, enemy in ipairs(enemies) do
+        createHighlight(enemy, enemyColor)
+    end
 end
 
--- ===== Initialize =====
-player.CharacterAdded:Connect(function()
-    task.wait(0.1)
-    createGUI()
+RunService.RenderStepped:Connect(function()
+    if _G.ESPEnabled then
+        pcall(updateESP)
+    else
+        for plr,_ in pairs(highlights) do
+            removeHighlight(plr)
+        end
+    end
 end)
 
-if player.Character then
-    createGUI()
-else
-    player.CharacterAdded:Wait()
-    createGUI()
+local function onESPCharacterAdded(player)
+    if _G.ESPEnabled then
+        task.defer(updateESP)
+    end
 end
 
-print("Instant Aimbot loaded – shoots on press!")
+for _, plr in ipairs(Players:GetPlayers()) do
+    plr.CharacterAdded:Connect(function() onESPCharacterAdded(plr) end)
+end
+Players.PlayerAdded:Connect(function(plr)
+    plr.CharacterAdded:Connect(function() onESPCharacterAdded(plr) end)
+end)
+LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(0.5)
+    if _G.ESPEnabled then updateESP() end
+end)
+
+-- ==================== Auto Collect Spawnables (Loop) ====================
+
+_G.AutoCollectEnabled = false
+_G.CollectDelay = 2  -- seconds between collects
+local collectLoop = nil
+
+-- Get the remote event
+local function getCollectEvent()
+    local networking = ReplicatedStorage:FindFirstChild("Packages") and ReplicatedStorage.Packages:FindFirstChild("Networking")
+    if not networking then return nil end
+    return networking:FindFirstChild("RE/Events/CollectEventSpawnable")
+end
+
+local function fireCollect()
+    local event = getCollectEvent()
+    if event then
+        pcall(function()
+            event:FireServer()
+            print("[AutoCollect] Fired")
+        end)
+    else
+        warn("[AutoCollect] Remote not found")
+    end
+end
+
+-- Start/stop the loop
+local function updateAutoCollect()
+    if _G.AutoCollectEnabled then
+        if collectLoop then return end
+        collectLoop = task.spawn(function()
+            while _G.AutoCollectEnabled do
+                fireCollect()
+                task.wait(_G.CollectDelay)
+            end
+            collectLoop = nil
+        end)
+    else
+        collectLoop = nil  -- loop will exit on next iteration
+    end
+end
+
+-- Also fire on character spawn
+LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(1)
+    if _G.AutoCollectEnabled then
+        fireCollect()
+    end
+end)
+
+if LocalPlayer.Character then
+    task.wait(1)
+    if _G.AutoCollectEnabled then
+        fireCollect()
+    end
+end
+
+-- ==================== Rayfield GUI ====================
+
+local Window = Rayfield:CreateWindow({
+    Name = "Hitbox + ESP + Auto Collect",
+    LoadingTitle = "All-in-One",
+    LoadingSubtitle = "By FrannnDev (extended)",
+    ConfigurationSaving = {
+        Enabled = true,
+        FolderName = "HitboxESPConfig",
+        FileName = "Config"
+    },
+    KeySystem = false
+})
+
+local MainTab = Window:CreateTab("Main", 15403121940)
+
+MainTab:CreateLabel("Hitbox Expander (with Anti‑Wall)")
+
+MainTab:CreateToggle({
+    Name = "Enable Hitbox",
+    CurrentValue = false,
+    Callback = function(v)
+        _G.HitboxEnabled = v
+        for _, plr in ipairs(Players:GetPlayers()) do applyHitbox(plr) end
+    end
+})
+
+MainTab:CreateToggle({
+    Name = "Anti‑Wall Shot (only expand when visible)",
+    CurrentValue = false,
+    Callback = function(v)
+        _G.AntiWall = v
+        if not v then
+            visibilityCache = {}
+            for _, plr in ipairs(Players:GetPlayers()) do applyHitbox(plr) end
+        end
+    end
+})
+
+MainTab:CreateInput({
+    Name = "Head Size (1-50)",
+    PlaceholderText = "e.g., 5",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(txt)
+        local n = tonumber(txt)
+        _G.HeadSize = n and math.clamp(n, 1, 50) or nil
+        for _, plr in ipairs(Players:GetPlayers()) do applyHitbox(plr) end
+    end
+})
+
+MainTab:CreateInput({
+    Name = "Transparency (0-1)",
+    PlaceholderText = "0 = solid, 1 = invisible",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(txt)
+        local n = tonumber(txt)
+        _G.Transparency = n and math.clamp(n, 0, 1) or nil
+        for _, plr in ipairs(Players:GetPlayers()) do applyHitbox(plr) end
+    end
+})
+
+MainTab:CreateDropdown({
+    Name = "Hitbox Color",
+    Options = {"Bright red", "Bright blue", "Bright yellow", "Bright green", "White", "Black", "Gray"},
+    CurrentOption = "Bright red",
+    Callback = function(opt)
+        _G.SelectedColor = opt
+        for _, plr in ipairs(Players:GetPlayers()) do applyHitbox(plr) end
+    end
+})
+
+MainTab:CreateLabel("ESP (Enemy Team Glow)")
+
+MainTab:CreateToggle({
+    Name = "Enable ESP",
+    CurrentValue = false,
+    Callback = function(v)
+        _G.ESPEnabled = v
+        if v then
+            updateESP()
+        else
+            for plr,_ in pairs(highlights) do
+                removeHighlight(plr)
+            end
+        end
+    end
+})
+
+MainTab:CreateLabel("Auto Collect Spawnables")
+
+MainTab:CreateToggle({
+    Name = "Enable Auto Collect",
+    CurrentValue = false,
+    Callback = function(v)
+        _G.AutoCollectEnabled = v
+        updateAutoCollect()
+        if v then
+            -- Fire once immediately
+            fireCollect()
+        end
+    end
+})
+
+MainTab:CreateSlider({
+    Name = "Collect Delay (seconds)",
+    Range = {0.5, 10},
+    Increment = 0.5,
+    Suffix = "s",
+    CurrentValue = 2,
+    Callback = function(value)
+        _G.CollectDelay = value
+        -- Restart loop if active to apply new delay
+        if _G.AutoCollectEnabled then
+            updateAutoCollect()  -- restarts loop with new delay
+        end
+    end
+})
+
+MainTab:CreateButton({
+    Name = "Test Collect Now",
+    Callback = function()
+        fireCollect()
+        Rayfield:Notify({
+            Title = "Auto Collect",
+            Content = "Fired CollectEventSpawnable",
+            Duration = 2,
+            Image = 15403175166
+        })
+    end
+})
+
+MainTab:CreateLabel("Note: ESP color adapts to enemy team.\nAuto collect fires every X seconds and on respawn.")
+
+print("All features loaded. Use the Rayfield GUI (side button).")
