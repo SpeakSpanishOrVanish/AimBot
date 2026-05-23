@@ -1,5 +1,5 @@
 -- Instant-Shot Aimbot for Duels: Murderers vs Sheriffs
--- Enhanced button with bouncy press animation and instant fire
+-- No animation, just fire instantly on tap/click
 
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
@@ -28,10 +28,7 @@ local camera = Workspace.CurrentCamera
 local localBeam = ReplicatedStorage:FindFirstChild("BindableEvents"):FindFirstChild("LocalBeam")
 local killedRemote = ReplicatedStorage:FindFirstChild("Remotes"):FindFirstChild("Killed")
 
--- Tween Configs
-local colorTweenInfo = TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-local pressTweenInfo = TweenInfo.new(0.1, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
-local releaseTweenInfo = TweenInfo.new(0.15, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out)
+local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
 -- ===== Team Check =====
 local function isValidTarget(otherPlayer)
@@ -79,14 +76,13 @@ local function hasClearLineOfSight(targetPlayer)
     local myRoot = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Torso")
     local tRoot = tChar:FindFirstChild("HumanoidRootPart") or tChar:FindFirstChild("Torso")
     if not myRoot or not tRoot then return false end
-    
+    local dir = (tRoot.Position - myRoot.Position).Unit
+    local dist = (tRoot.Position - myRoot.Position).Magnitude
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Blacklist
     params.FilterDescendantsInstances = {char, tChar}
     params.IgnoreWater = true
-    
-    local result = workspace:Raycast(myRoot.Position, tRoot.Position - myRoot.Position, params)
-    return result == nil
+    return workspace:Raycast(myRoot.Position, dir * dist, params) == nil
 end
 
 local function getNearestVisibleEnemy()
@@ -111,6 +107,7 @@ local function getNearestVisibleEnemy()
     return nearest
 end
 
+-- Shoot instantly
 local function shootEnemy(targetPlayer)
     local char = player.Character
     if not char then return false end
@@ -139,98 +136,95 @@ local function shootEnemy(targetPlayer)
     return true
 end
 
--- ===== GUI & Animation =====
+-- ===== Create GUI =====
 local function createGUI()
     if screenGui then screenGui:Destroy() end
 
     local playerGui = player:WaitForChild("PlayerGui")
+
     screenGui = Instance.new("ScreenGui")
     screenGui.Name = "AimbotButtonGui"
     screenGui.ResetOnSpawn = false
     screenGui.IgnoreGuiInset = true
+    screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     screenGui.Parent = playerGui
 
-    local buttonContainer = Instance.new("Frame")
-    buttonContainer.Size = UDim2.new(0, 70, 0, 70)
-    buttonContainer.Position = UDim2.new(1, -58, 1, -218)
-    buttonContainer.BackgroundTransparency = 1
-    buttonContainer.Parent = screenGui
+    local shadow = Instance.new("Frame")
+    shadow.Size = UDim2.new(0, 76, 0, 76)
+    shadow.AnchorPoint = Vector2.new(1, 1)
+    shadow.Position = UDim2.new(1, -20, 1, -180)
+    shadow.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    shadow.BackgroundTransparency = 0.85
+    shadow.BorderSizePixel = 0
+    shadow.ZIndex = 9
+    shadow.Parent = screenGui
+    Instance.new("UICorner", shadow).CornerRadius = UDim.new(0, 16)
 
     button = Instance.new("TextButton")
-    button.Size = UDim2.new(1, 0, 1, 0)
+    button.Size = UDim2.new(0, 70, 0, 70)
+    button.AnchorPoint = Vector2.new(1, 1)
+    button.Position = UDim2.new(1, -23, 1, -183)
     button.BackgroundColor3 = readyColor
-    button.BackgroundTransparency = 0.3
-    button.Text = "FIRE"
-    button.TextColor3 = Color3.fromRGB(255, 255, 255)
-    button.Font = Enum.Font.GothamBold
-    button.TextSize = 18
+    button.BackgroundTransparency = 0.85
+    button.BorderSizePixel = 0
+    button.Text = ""
     button.AutoButtonColor = false
     button.ZIndex = 10
-    button.Parent = buttonContainer
+    button.Parent = screenGui
 
     Instance.new("UICorner", button).CornerRadius = UDim.new(0, 14)
+
     stroke = Instance.new("UIStroke", button)
     stroke.Color = Color3.fromRGB(255, 255, 255)
-    stroke.Thickness = 2.5
+    stroke.Transparency = 0.0
+    stroke.Thickness = 3.0
+    stroke.LineJoinMode = Enum.LineJoinMode.Round
 
-    local function animatePressEffect()
-        -- Squish down
-        TweenService:Create(button, pressTweenInfo, {
-            Size = UDim2.new(0.85, 0, 0.85, 0),
-            BackgroundTransparency = 0.1
-        }):Play()
-        
-        task.wait(0.08)
-        
-        -- Bounce back
-        TweenService:Create(button, releaseTweenInfo, {
-            Size = UDim2.new(1, 0, 1, 0),
-            BackgroundTransparency = 0.3
-        }):Play()
-    end
-
+    -- Color update with tween
     local function setButtonState(isReady)
         local targetColor = isReady and readyColor or cooldownColor
-        TweenService:Create(button, colorTweenInfo, {BackgroundColor3 = targetColor}):Play()
-        button.Text = isReady and "FIRE" or "WAIT"
+        local colorTween = TweenService:Create(button, tweenInfo, {BackgroundColor3 = targetColor})
+        colorTween:Play()
     end
 
+    -- Instant shoot, no animation
     local function instantShoot()
         if not canShoot then return end
-        
-        local weapon = getWeapon()
-        if not weapon then return end
+        if not player.Character or not player.Character:FindFirstChild("Humanoid") then return end
+        if not getWeapon() then return end
 
         local target = getNearestVisibleEnemy()
-        if target then
-            if shootEnemy(target) then
-                task.spawn(animatePressEffect)
-                canShoot = false
-                setButtonState(false)
-                
-                task.delay(cooldownTime, function()
-                    canShoot = true
-                    setButtonState(true)
-                end)
-            end
-        else
-            -- Feedback for no target found
-            task.spawn(animatePressEffect)
+        if target and shootEnemy(target) then
+            canShoot = false
+            lastShotTime = tick()
+            setButtonState(false)
+            task.spawn(function()
+                task.wait(cooldownTime)
+                canShoot = true
+                setButtonState(true)
+            end)
         end
     end
 
     button.MouseButton1Down:Connect(instantShoot)
     button.TouchStarted:Connect(instantShoot)
-    
+
+    canShoot = true
+    lastShotTime = 0
     setButtonState(true)
 end
 
--- ===== Init =====
+-- ===== Initialize =====
 player.CharacterAdded:Connect(function()
-    task.wait(0.5)
+    task.wait(0.1)
     createGUI()
 end)
 
-if player.Character then createGUI() end
+if player.Character then
+    createGUI()
+else
+    player.CharacterAdded:Wait()
+    createGUI()
+end
 
-print("Smooth Instant Aimbot Loaded")
+print("Instant Aimbot loaded – no animation, just fire on tap")
