@@ -1,5 +1,5 @@
 -- Instant-Shot Aimbot for Duels: Murderers vs Sheriffs
--- Smoother button with press animation, instant fire on tap/click
+-- Enhanced button with bouncy press animation and instant fire
 
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
@@ -28,8 +28,10 @@ local camera = Workspace.CurrentCamera
 local localBeam = ReplicatedStorage:FindFirstChild("BindableEvents"):FindFirstChild("LocalBeam")
 local killedRemote = ReplicatedStorage:FindFirstChild("Remotes"):FindFirstChild("Killed")
 
-local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-local pressTweenInfo = TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+-- Tween Configs
+local colorTweenInfo = TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local pressTweenInfo = TweenInfo.new(0.1, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+local releaseTweenInfo = TweenInfo.new(0.15, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out)
 
 -- ===== Team Check =====
 local function isValidTarget(otherPlayer)
@@ -49,7 +51,7 @@ local function isValidTarget(otherPlayer)
     return true
 end
 
--- ===== Weapon & Combat (optimized) =====
+-- ===== Weapon & Combat =====
 local function getWeapon()
     local char = player.Character
     if not char then return nil end
@@ -77,13 +79,14 @@ local function hasClearLineOfSight(targetPlayer)
     local myRoot = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Torso")
     local tRoot = tChar:FindFirstChild("HumanoidRootPart") or tChar:FindFirstChild("Torso")
     if not myRoot or not tRoot then return false end
-    local dir = (tRoot.Position - myRoot.Position).Unit
-    local dist = (tRoot.Position - myRoot.Position).Magnitude
+    
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Blacklist
     params.FilterDescendantsInstances = {char, tChar}
     params.IgnoreWater = true
-    return workspace:Raycast(myRoot.Position, dir * dist, params) == nil
+    
+    local result = workspace:Raycast(myRoot.Position, tRoot.Position - myRoot.Position, params)
+    return result == nil
 end
 
 local function getNearestVisibleEnemy()
@@ -108,7 +111,6 @@ local function getNearestVisibleEnemy()
     return nearest
 end
 
--- Shoot instantly – no delays
 local function shootEnemy(targetPlayer)
     local char = player.Character
     if not char then return false end
@@ -137,115 +139,98 @@ local function shootEnemy(targetPlayer)
     return true
 end
 
--- ===== Create Smooth GUI =====
+-- ===== GUI & Animation =====
 local function createGUI()
     if screenGui then screenGui:Destroy() end
 
     local playerGui = player:WaitForChild("PlayerGui")
-
     screenGui = Instance.new("ScreenGui")
     screenGui.Name = "AimbotButtonGui"
     screenGui.ResetOnSpawn = false
     screenGui.IgnoreGuiInset = true
-    screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     screenGui.Parent = playerGui
 
-    local shadow = Instance.new("Frame")
-    shadow.Size = UDim2.new(0, 76, 0, 76)
-    shadow.AnchorPoint = Vector2.new(1, 1)
-    shadow.Position = UDim2.new(1, -20, 1, -180)
-    shadow.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-    shadow.BackgroundTransparency = 0.85
-    shadow.BorderSizePixel = 0
-    shadow.ZIndex = 9
-    shadow.Parent = screenGui
-    Instance.new("UICorner", shadow).CornerRadius = UDim.new(0, 16)
+    local buttonContainer = Instance.new("Frame")
+    buttonContainer.Size = UDim2.new(0, 70, 0, 70)
+    buttonContainer.Position = UDim2.new(1, -58, 1, -218)
+    buttonContainer.BackgroundTransparency = 1
+    buttonContainer.Parent = screenGui
 
     button = Instance.new("TextButton")
-    button.Size = UDim2.new(0, 70, 0, 70)
-    button.AnchorPoint = Vector2.new(1, 1)
-    button.Position = UDim2.new(1, -23, 1, -183)
+    button.Size = UDim2.new(1, 0, 1, 0)
     button.BackgroundColor3 = readyColor
-    button.BackgroundTransparency = 0.85
-    button.BorderSizePixel = 0
-    button.Text = ""
+    button.BackgroundTransparency = 0.3
+    button.Text = "FIRE"
+    button.TextColor3 = Color3.fromRGB(255, 255, 255)
+    button.Font = Enum.Font.GothamBold
+    button.TextSize = 18
     button.AutoButtonColor = false
     button.ZIndex = 10
-    button.Parent = screenGui
+    button.Parent = buttonContainer
 
-    local corner = Instance.new("UICorner", button)
-    corner.CornerRadius = UDim.new(0, 14)
-
+    Instance.new("UICorner", button).CornerRadius = UDim.new(0, 14)
     stroke = Instance.new("UIStroke", button)
     stroke.Color = Color3.fromRGB(255, 255, 255)
-    stroke.Transparency = 0.0
-    stroke.Thickness = 3.0
-    stroke.LineJoinMode = Enum.LineJoinMode.Round
+    stroke.Thickness = 2.5
 
-    -- Smooth button press animation
-    local function animatePress()
-        local originalSize = button.Size
-        local pressSize = UDim2.new(originalSize.X.Scale, originalSize.X.Offset - 8, originalSize.Y.Scale, originalSize.Y.Offset - 8)
-        local pressTween = TweenService:Create(button, pressTweenInfo, {Size = pressSize})
-        local releaseTween = TweenService:Create(button, pressTweenInfo, {Size = originalSize})
-        pressTween:Play()
-        pressTween.Completed:Wait()
-        releaseTween:Play()
+    local function animatePressEffect()
+        -- Squish down
+        TweenService:Create(button, pressTweenInfo, {
+            Size = UDim2.new(0.85, 0, 0.85, 0),
+            BackgroundTransparency = 0.1
+        }):Play()
+        
+        task.wait(0.08)
+        
+        -- Bounce back
+        TweenService:Create(button, releaseTweenInfo, {
+            Size = UDim2.new(1, 0, 1, 0),
+            BackgroundTransparency = 0.3
+        }):Play()
     end
 
-    -- Color update with tween
     local function setButtonState(isReady)
         local targetColor = isReady and readyColor or cooldownColor
-        local colorTween = TweenService:Create(button, tweenInfo, {BackgroundColor3 = targetColor})
-        colorTween:Play()
+        TweenService:Create(button, colorTweenInfo, {BackgroundColor3 = targetColor}):Play()
+        button.Text = isReady and "FIRE" or "WAIT"
     end
 
-    -- === INSTANT SHOOT on press with smooth feedback ===
     local function instantShoot()
         if not canShoot then return end
-        if not player.Character or not player.Character:FindFirstChild("Humanoid") then return end
-        if not getWeapon() then return end
+        
+        local weapon = getWeapon()
+        if not weapon then return end
 
         local target = getNearestVisibleEnemy()
-        if target and shootEnemy(target) then
-            -- Visual press feedback (does not delay the shot)
-            task.spawn(animatePress)
-            canShoot = false
-            lastShotTime = tick()
-            setButtonState(false)
-            -- Simple cooldown without busy loop
-            task.spawn(function()
-                task.wait(cooldownTime)
-                canShoot = true
-                setButtonState(true)
-            end)
+        if target then
+            if shootEnemy(target) then
+                task.spawn(animatePressEffect)
+                canShoot = false
+                setButtonState(false)
+                
+                task.delay(cooldownTime, function()
+                    canShoot = true
+                    setButtonState(true)
+                end)
+            end
         else
-            -- If no target, still give a tiny visual feedback (optional)
-            task.spawn(animatePress)
+            -- Feedback for no target found
+            task.spawn(animatePressEffect)
         end
     end
 
-    -- Connect events for instant response
     button.MouseButton1Down:Connect(instantShoot)
     button.TouchStarted:Connect(instantShoot)
-
-    -- Initial state
-    canShoot = true
-    lastShotTime = 0
+    
     setButtonState(true)
 end
 
--- ===== Initialize =====
+-- ===== Init =====
 player.CharacterAdded:Connect(function()
-    task.wait(0.1)
+    task.wait(0.5)
     createGUI()
 end)
 
-if player.Character then
-    createGUI()
-else
-    player.CharacterAdded:Wait()
-    createGUI()
-end
+if player.Character then createGUI() end
 
-print("Smooth Instant Aimbot loaded – tap/click fires instantly with animation!")
+print("Smooth Instant Aimbot Loaded")
