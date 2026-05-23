@@ -1,5 +1,5 @@
 -- Instant-Shot Aimbot for Duels: Murderers vs Sheriffs
--- Fixed right side, green/red tint, white outline, no teammates
+-- Smoother button with press animation, instant fire on tap/click
 
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
@@ -29,8 +29,9 @@ local localBeam = ReplicatedStorage:FindFirstChild("BindableEvents"):FindFirstCh
 local killedRemote = ReplicatedStorage:FindFirstChild("Remotes"):FindFirstChild("Killed")
 
 local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local pressTweenInfo = TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
--- ===== Team Check (same as before) =====
+-- ===== Team Check =====
 local function isValidTarget(otherPlayer)
     if not otherPlayer or otherPlayer == player then return false end
     if not otherPlayer.Character then return false end
@@ -39,15 +40,11 @@ local function isValidTarget(otherPlayer)
 
     local myGame = player:GetAttribute("Game")
     local theirGame = otherPlayer:GetAttribute("Game")
-    if myGame and theirGame and myGame ~= theirGame then
-        return false
-    end
+    if myGame and theirGame and myGame ~= theirGame then return false end
 
     local myTeam = player:GetAttribute("Team")
     local theirTeam = otherPlayer:GetAttribute("Team")
-    if myTeam and theirTeam and myTeam == theirTeam then
-        return false
-    end
+    if myTeam and theirTeam and myTeam == theirTeam then return false end
 
     return true
 end
@@ -111,7 +108,7 @@ local function getNearestVisibleEnemy()
     return nearest
 end
 
--- Shoot instantly – no task.spawn, no extra checks
+-- Shoot instantly – no delays
 local function shootEnemy(targetPlayer)
     local char = player.Character
     if not char then return false end
@@ -125,7 +122,6 @@ local function shootEnemy(targetPlayer)
     local startPos = handle.Position
     local hitPos = tRoot.Position
 
-    -- Fire all remotes immediately
     if localBeam then pcall(function() localBeam:Fire(handle, hitPos) end) end
     local fireRemote = weapon:FindFirstChild("fire")
     if fireRemote then pcall(function() fireRemote:FireServer() end) end
@@ -141,7 +137,7 @@ local function shootEnemy(targetPlayer)
     return true
 end
 
--- ===== Create GUI =====
+-- ===== Create Smooth GUI =====
 local function createGUI()
     if screenGui then screenGui:Destroy() end
 
@@ -177,7 +173,8 @@ local function createGUI()
     button.ZIndex = 10
     button.Parent = screenGui
 
-    Instance.new("UICorner", button).CornerRadius = UDim.new(0, 14)
+    local corner = Instance.new("UICorner", button)
+    corner.CornerRadius = UDim.new(0, 14)
 
     stroke = Instance.new("UIStroke", button)
     stroke.Color = Color3.fromRGB(255, 255, 255)
@@ -185,14 +182,25 @@ local function createGUI()
     stroke.Thickness = 3.0
     stroke.LineJoinMode = Enum.LineJoinMode.Round
 
-    -- Button color update
-    local function setButtonState(isReady)
-        local targetColor = isReady and readyColor or cooldownColor
-        local tween = TweenService:Create(button, tweenInfo, {BackgroundColor3 = targetColor})
-        tween:Play()
+    -- Smooth button press animation
+    local function animatePress()
+        local originalSize = button.Size
+        local pressSize = UDim2.new(originalSize.X.Scale, originalSize.X.Offset - 8, originalSize.Y.Scale, originalSize.Y.Offset - 8)
+        local pressTween = TweenService:Create(button, pressTweenInfo, {Size = pressSize})
+        local releaseTween = TweenService:Create(button, pressTweenInfo, {Size = originalSize})
+        pressTween:Play()
+        pressTween.Completed:Wait()
+        releaseTween:Play()
     end
 
-    -- === INSTANT SHOOT on press ===
+    -- Color update with tween
+    local function setButtonState(isReady)
+        local targetColor = isReady and readyColor or cooldownColor
+        local colorTween = TweenService:Create(button, tweenInfo, {BackgroundColor3 = targetColor})
+        colorTween:Play()
+    end
+
+    -- === INSTANT SHOOT on press with smooth feedback ===
     local function instantShoot()
         if not canShoot then return end
         if not player.Character or not player.Character:FindFirstChild("Humanoid") then return end
@@ -200,24 +208,28 @@ local function createGUI()
 
         local target = getNearestVisibleEnemy()
         if target and shootEnemy(target) then
+            -- Visual press feedback (does not delay the shot)
+            task.spawn(animatePress)
             canShoot = false
             lastShotTime = tick()
             setButtonState(false)
-            -- Cooldown timer runs in background
+            -- Simple cooldown without busy loop
             task.spawn(function()
-                while tick() - lastShotTime < cooldownTime do task.wait(0.1) end
+                task.wait(cooldownTime)
                 canShoot = true
                 setButtonState(true)
             end)
+        else
+            -- If no target, still give a tiny visual feedback (optional)
+            task.spawn(animatePress)
         end
     end
 
-    -- Fire on press (MouseButton1Down) for instant reaction
+    -- Connect events for instant response
     button.MouseButton1Down:Connect(instantShoot)
-    -- For mobile, TouchTap is fine but let's also use TouchStarted for instant response
     button.TouchStarted:Connect(instantShoot)
 
-    -- Initial ready state
+    -- Initial state
     canShoot = true
     lastShotTime = 0
     setButtonState(true)
@@ -236,4 +248,4 @@ else
     createGUI()
 end
 
-print("Instant Aimbot loaded – shoots on press!")
+print("Smooth Instant Aimbot loaded – tap/click fires instantly with animation!")
